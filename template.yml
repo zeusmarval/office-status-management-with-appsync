@@ -1,0 +1,421 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Managing office status changes in real time with appsync.
+
+Resources:
+  # SecretManager
+  SecretJWT:
+    Type: AWS::SecretsManager::Secret
+    Properties: 
+      Description: Secret for JWT validation.
+      GenerateSecretString:
+        SecretStringTemplate: '{"secretKey": ""}'
+        GenerateStringKey: secretKey
+
+  # IAM Role for CloudWatch Logs
+  AppSyncLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: appsync.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppSyncCloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  # GraphQLApi
+
+  AppSyncGraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties: 
+      Name: !Sub ${AWS::StackName}-AppSync
+      AuthenticationType: AWS_LAMBDA
+      LambdaAuthorizerConfig:
+        AuthorizerUri: !GetAtt JWTAuthorizerFunction.Arn
+        IdentityValidationExpression: ".*"
+      LogConfig:
+        FieldLogLevel: ALL  # Options: NONE, ERROR, or ALL
+        CloudWatchLogsRoleArn: !GetAtt AppSyncLoggingRole.Arn
+
+  # GraphQLSchema
+
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      Definition: |
+        type Mutation {
+          createUser(userId: ID!, officeId: [ID!]): User
+          addOfficeUser(userId: ID!, officeId: ID!): User
+          createOffice(officeId: ID!, officeName: String!): Office
+          statusOffice(officeId: ID!, status: String!): StatusOffice
+        }
+
+        type Office {
+          officeId: ID!
+          officeName: String!
+          status: String!
+        }
+
+        type StatusOffice {
+          officeId: ID!
+          status: String!
+        }
+
+        type User {
+          userId: ID!
+          officeId: [ID!]
+        }
+
+        type Subscription {
+          onCreateOffice: StatusOffice
+            @aws_subscribe(mutations: ["statusOffice"])
+        }
+
+        type Query {
+          getOfficeByID(officeId: ID!): Office
+          getOffices: [Office]
+        }
+
+        schema {
+          query: Query
+          mutation: Mutation
+          subscription: Subscription
+        }
+
+  # LambdaFunction
+
+  JWTAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      MemorySize: 128
+      Timeout: 5
+      Handler: index.handler
+      Runtime: nodejs20.x
+      CodeUri: src\lambdas\authorizer
+      Environment:
+        Variables:
+          SECRET_ARN: !GetAtt SecretJWT.Id
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem                
+              Resource: !GetAtt UsersTable.Arn
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !GetAtt SecretJWT.Id
+
+  # Lambda permision
+
+  AppSyncLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref JWTAuthorizerFunction
+      Action: lambda:InvokeFunction
+      Principal: appsync.amazonaws.com
+
+  # DynamodbTable
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UsersTable
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+  
+  OfficeTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: OfficesTable
+      AttributeDefinitions:
+        - AttributeName: officeId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: officeId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # Data source
+
+  UsersDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      Name: DynamoDBDataSourceUsers
+      Type: AMAZON_DYNAMODB
+      DynamoDBConfig:
+        TableName: UsersTable
+        AwsRegion: !Ref AWS::Region
+      ServiceRoleArn: !GetAtt AppSyncServiceRole.Arn
+  
+  OfficesDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      Name: DynamoDBDataSourceOffice
+      Type: AMAZON_DYNAMODB
+      DynamoDBConfig:
+        TableName: OfficesTable
+        AwsRegion: !Ref AWS::Region
+      ServiceRoleArn: !GetAtt AppSyncServiceRole.Arn
+  
+  EmptyDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      Name: EmptyDataSource
+      Type: NONE
+
+  # AppSync Role
+
+  AppSyncServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: appsync.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-AppSyncDynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                Resource:
+                  - !GetAtt UsersTable.Arn
+                  - !GetAtt OfficeTable.Arn
+
+  # Resolver
+
+  CreateUserResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: createUser
+      DataSourceName: !GetAtt UsersDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "PutItem",
+          "key": {
+            "userId": $util.dynamodb.toDynamoDBJson($ctx.arguments.userId)
+          },
+          "attributeValues": {
+            "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId)
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  AddOfficeUserResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: addOfficeUser
+      DataSourceName: !GetAtt UsersDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "UpdateItem",
+          "key": {
+            "userId": $util.dynamodb.toDynamoDBJson($ctx.arguments.userId)
+          },
+          "update": {
+            "expression": "SET #officeId = list_append(if_not_exists(#officeId, :empty_list), :officeId)",
+            "expressionNames": {
+              "#officeId": "officeId"
+            },
+            "expressionValues": {
+              ":officeId": {
+                "L": [
+                  {
+                    "S": "$ctx.arguments.officeId"
+                  }
+                ]
+              },
+              ":empty_list": {
+                "L": []
+              }
+            }
+          }
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+          $utils.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  CreateOfficeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: createOffice
+      DataSourceName: !GetAtt OfficesDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "PutItem",
+          "key": {
+            "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId)
+          },
+          "attributeValues": {
+            "officeName": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeName),
+            "status": $util.dynamodb.toDynamoDBJson("offline")
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  StatusOfficeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: statusOffice
+      DataSourceName: !GetAtt OfficesDataSource.Name
+      RequestMappingTemplate: |
+        #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
+        #set($officeId = $ctx.arguments.officeId)
+
+        #if(!$allowedOffices.contains($officeId))
+          $util.unauthorized()
+        #end
+        {
+          "version": "2017-02-28",
+          "operation": "UpdateItem",
+          "key": {
+            "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId)
+          },
+          "update": {
+            "expression": "SET #status = :status",
+            "expressionNames": {
+              "#status": "status"
+            },
+            "expressionValues": {
+              ":status": $util.dynamodb.toDynamoDBJson($ctx.arguments.status)
+            }
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  GetOfficeByIDResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Query
+      FieldName: getOfficeByID
+      DataSourceName: !GetAtt OfficesDataSource.Name
+      RequestMappingTemplate: |
+        #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
+        #set($officeId = $ctx.arguments.officeId)
+
+        #if(!$allowedOffices.contains($officeId))
+          $util.unauthorized()
+        #end      
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId)
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  GetOfficesResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Query
+      FieldName: getOffices
+      DataSourceName: !GetAtt OfficesDataSource.Name
+      RequestMappingTemplate: |
+        #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
+
+        #set($ids = [])
+        #foreach($id in $allowedOffices)
+            #set($map = {})
+            $util.qr($map.put("officeId", $util.dynamodb.toString($id)))
+            $util.qr($ids.add($map))
+        #end
+
+        {
+            "version" : "2018-05-29",
+            "operation" : "BatchGetItem",
+            "tables" : {
+                "OfficesTable": {
+                    "keys": $util.toJson($ids),
+                    "consistentRead": true
+                }
+            }
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+          $utils.error($ctx.error.message, $ctx.error.type)
+        #end
+        #set($result = [])
+        #foreach($item in $ctx.result.data.OfficesTable)
+            #if(!$util.isNull($item))
+                $util.qr($result.add($item))
+            #end
+        #end
+        $util.toJson($result)
+
+
+  OnCreateOfficeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+      TypeName: Subscription
+      FieldName: onCreateOffice
+      DataSourceName: !GetAtt EmptyDataSource.Name
+      RequestMappingTemplate: |
+        {
+            "version": "2017-02-28",
+            "payload": {}
+        }
+      ResponseMappingTemplate: |
+        #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
+        #set($filter = {
+          "officeId": {
+            "in": $allowedOffices
+          }
+        })
+        $extensions.setSubscriptionFilter($util.transform.toSubscriptionFilter($filter))
+
+        null
