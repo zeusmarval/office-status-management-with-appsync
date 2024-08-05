@@ -44,7 +44,7 @@ The template provisions the following AWS resources:
 1. **Clone the repository:**
 
     ```sh
-    git clone https://github.com/your-repo/office-status-appsync.git
+    git clone https://github.com/zeusmarval/office-status-management-with-appsync
     cd office-status-appsync
     ```
 
