@@ -65,7 +65,7 @@ Resources:
       LogConfig:
         FieldLogLevel: ALL  # Options: NONE, ERROR, or ALL
         CloudWatchLogsRoleArn: !GetAtt AppSyncLoggingRole.Arn
-      # XrayEnabled: true
+      XrayEnabled: true
 
   AppSyncGraphQLApiLogGroup:
     Type: AWS::Logs::LogGroup
