@@ -2,7 +2,7 @@
   "name": "jwt-auth",
   "version": "1.0.0",
   "dependencies": {
-    "jsonwebtoken": "^9.0.2",
-    "aws-sdk": "^2.1632.0"
+    "jsonwebtoken": "9.0.2",
+    "aws-sdk": "2.1632.0"
   }
 }

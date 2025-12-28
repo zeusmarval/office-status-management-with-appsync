@@ -1,0 +1,21 @@
+version = 0.1
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "dev-offices-status"
+resolve_s3 = true
+s3_prefix = "dev-offices-status"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = "Environment=\"dev\""
+image_repositories = []
+tags = [
+    "author=zama",
+    "Resources=realtime-services"
+]
+
+[default.global.parameters]
+region = "us-east-1"

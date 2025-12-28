@@ -1,0 +1,18 @@
+{
+  "name": "office-status-management-with-appsync",
+  "version": "1.0.0",
+  "description": "Office status management with AWS AppSync",
+  "type": "module",
+  "scripts": {
+    "generate-token": "node scripts/generate-token.mjs"
+  },
+  "dependencies": {
+    "jsonwebtoken": "9.0.2",
+    "aws-sdk": "2.1632.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
+

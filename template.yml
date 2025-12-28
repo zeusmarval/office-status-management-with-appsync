@@ -1,13 +1,28 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: 'AWS::Serverless-2016-10-31'
-Description: Managing office status changes in real time with appsync.
+Description: OFFICE-STATUS - STACK | Stack de CloudFormation para gestion de estado de oficinas en tiempo real con AppSync
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - qa
+      - prod
+    Description: Environment name (dev, qa, prod)
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, "prod"]
 
 Resources:
   # SecretManager
-  SecretJWT:
+  JWTValidationSecret:
     Type: AWS::SecretsManager::Secret
-    Properties: 
-      Description: Secret for JWT validation.
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${AWS::StackName}-jwt-validation
+      Description: OFFICE-STATUS - JWT VALIDATION | Secret para validacion de tokens JWT
       GenerateSecretString:
         SecretStringTemplate: '{"secretKey": ""}'
         GenerateStringKey: secretKey
@@ -16,6 +31,8 @@ Resources:
   AppSyncLoggingRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub ${AWS::StackName}-appsync-logging-role
+      Description: OFFICE-STATUS - APPSYNC LOGGING | Rol IAM para logging de AppSync en CloudWatch
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -24,7 +41,7 @@ Resources:
               Service: appsync.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: AppSyncCloudWatchLogsPolicy
+        - PolicyName: !Sub ${AWS::StackName}-AppSyncCloudWatchLogsPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -33,14 +50,14 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: "*"
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/appsync/apis/*
 
   # GraphQLApi
 
   AppSyncGraphQLApi:
     Type: AWS::AppSync::GraphQLApi
-    Properties: 
-      Name: !Sub ${AWS::StackName}-AppSync
+    Properties:
+      Name: !Sub ${AWS::StackName}-appsync
       AuthenticationType: AWS_LAMBDA
       LambdaAuthorizerConfig:
         AuthorizerUri: !GetAtt JWTAuthorizerFunction.Arn
@@ -48,6 +65,13 @@ Resources:
       LogConfig:
         FieldLogLevel: ALL  # Options: NONE, ERROR, or ALL
         CloudWatchLogsRoleArn: !GetAtt AppSyncLoggingRole.Arn
+      # XrayEnabled: true
+
+  AppSyncGraphQLApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/appsync/apis/${AppSyncGraphQLApi.ApiId}
+      RetentionInDays: !If [IsProduction, 7, 1]
 
   # GraphQLSchema
 
@@ -100,25 +124,34 @@ Resources:
   JWTAuthorizerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      MemorySize: 128
-      Timeout: 5
+      FunctionName: !Sub ${AWS::StackName}-jwt-authorizer
+      Description: OFFICE-STATUS - JWT AUTHORIZER | Funcion Lambda para autorizacion JWT en AppSync
+      Runtime: nodejs22.x
       Handler: index.handler
-      Runtime: nodejs20.x
-      CodeUri: src\lambdas\authorizer
+      CodeUri: src/lambdas/authorizer
+      Timeout: 5
+      MemorySize: 128
       Environment:
         Variables:
-          SECRET_ARN: !GetAtt SecretJWT.Id
+          SECRET_ARN: !GetAtt JWTValidationSecret.Id
+          USERS_TABLE_NAME: !Ref UsersTable
+          CACHE_TTL: "900000"
       Policies:
         - Statement:
             - Effect: Allow
               Action:
-                - dynamodb:GetItem                
+                - dynamodb:GetItem
               Resource: !GetAtt UsersTable.Arn
             - Effect: Allow
               Action:
                 - secretsmanager:GetSecretValue
-              Resource:
-                - !GetAtt SecretJWT.Id
+              Resource: !Ref JWTValidationSecret
+
+  JWTAuthorizerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${JWTAuthorizerFunction}
+      RetentionInDays: !If [IsProduction, 7, 1]
 
   # Lambda permision
 
@@ -134,7 +167,7 @@ Resources:
   UsersTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: UsersTable
+      TableName: !Sub ${AWS::StackName}-users
       AttributeDefinitions:
         - AttributeName: userId
           AttributeType: S
@@ -142,11 +175,11 @@ Resources:
         - AttributeName: userId
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
-  
-  OfficeTable:
+
+  OfficesTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: OfficesTable
+      TableName: !Sub ${AWS::StackName}-offices
       AttributeDefinitions:
         - AttributeName: officeId
           AttributeType: S
@@ -161,29 +194,32 @@ Resources:
     Type: AWS::AppSync::DataSource
     Properties:
       ApiId: !GetAtt AppSyncGraphQLApi.ApiId
-      Name: DynamoDBDataSourceUsers
+      Name: UsersDataSource
+      Description: OFFICE-STATUS - USERS DATASOURCE | Data source de DynamoDB para operaciones de usuarios
       Type: AMAZON_DYNAMODB
       DynamoDBConfig:
-        TableName: UsersTable
+        TableName: !Ref UsersTable
         AwsRegion: !Ref AWS::Region
       ServiceRoleArn: !GetAtt AppSyncServiceRole.Arn
-  
+
   OfficesDataSource:
     Type: AWS::AppSync::DataSource
     Properties:
       ApiId: !GetAtt AppSyncGraphQLApi.ApiId
-      Name: DynamoDBDataSourceOffice
+      Name: OfficesDataSource
+      Description: OFFICE-STATUS - OFFICES DATASOURCE | Data source de DynamoDB para operaciones de oficinas
       Type: AMAZON_DYNAMODB
       DynamoDBConfig:
-        TableName: OfficesTable
+        TableName: !Ref OfficesTable
         AwsRegion: !Ref AWS::Region
       ServiceRoleArn: !GetAtt AppSyncServiceRole.Arn
-  
+
   EmptyDataSource:
     Type: AWS::AppSync::DataSource
     Properties:
       ApiId: !GetAtt AppSyncGraphQLApi.ApiId
       Name: EmptyDataSource
+      Description: OFFICE-STATUS - EMPTY DATASOURCE | Data source vacio para subscriptions
       Type: NONE
 
   # AppSync Role
@@ -191,6 +227,8 @@ Resources:
   AppSyncServiceRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub ${AWS::StackName}-appsync-service-role
+      Description: OFFICE-STATUS - APPSYNC SERVICE ROLE | Rol IAM para que AppSync acceda a DynamoDB
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -214,7 +252,7 @@ Resources:
                   - dynamodb:BatchGetItem
                 Resource:
                   - !GetAtt UsersTable.Arn
-                  - !GetAtt OfficeTable.Arn
+                  - !GetAtt OfficesTable.Arn
 
   # Resolver
 
@@ -233,7 +271,15 @@ Resources:
             "userId": $util.dynamodb.toDynamoDBJson($ctx.arguments.userId)
           },
           "attributeValues": {
-            "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId)
+            "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId),
+            "createdAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601()),
+            "updatedAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601())
+          },
+          "condition": {
+            "expression": "attribute_not_exists(userId)",
+            "expressionNames": {
+              "#userId": "userId"
+            }
           }
         }
       ResponseMappingTemplate: |
@@ -294,7 +340,12 @@ Resources:
           },
           "attributeValues": {
             "officeName": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeName),
-            "status": $util.dynamodb.toDynamoDBJson("offline")
+            "status": $util.dynamodb.toDynamoDBJson("offline"),
+            "createdAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601()),
+            "updatedAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601())
+          },
+          "condition": {
+            "expression": "attribute_not_exists(officeId)"
           }
         }
       ResponseMappingTemplate: |
@@ -308,12 +359,21 @@ Resources:
       FieldName: statusOffice
       DataSourceName: !GetAtt OfficesDataSource.Name
       RequestMappingTemplate: |
+        #set($isAdmin = $ctx.identity.resolverContext.isAdmin == "true")
         #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
         #set($officeId = $ctx.arguments.officeId)
 
-        #if(!$allowedOffices.contains($officeId))
+        #set($status = $ctx.arguments.status)
+        #set($validStatuses = ["online", "offline", "busy", "away"])
+
+        #if(!$isAdmin && !$allowedOffices.contains($officeId))
           $util.unauthorized()
         #end
+
+        #if(!$validStatuses.contains($status))
+          $util.error("Invalid status. Allowed values: online, offline, busy, away")
+        #end
+
         {
           "version": "2017-02-28",
           "operation": "UpdateItem",
@@ -321,12 +381,14 @@ Resources:
             "officeId": $util.dynamodb.toDynamoDBJson($ctx.arguments.officeId)
           },
           "update": {
-            "expression": "SET #status = :status",
+            "expression": "SET #status = :status, #updatedAt = :updatedAt",
             "expressionNames": {
-              "#status": "status"
+              "#status": "status",
+              "#updatedAt": "updatedAt"
             },
             "expressionValues": {
-              ":status": $util.dynamodb.toDynamoDBJson($ctx.arguments.status)
+              ":status": $util.dynamodb.toDynamoDBJson($ctx.arguments.status),
+              ":updatedAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601())
             }
           }
         }
@@ -341,10 +403,11 @@ Resources:
       FieldName: getOfficeByID
       DataSourceName: !GetAtt OfficesDataSource.Name
       RequestMappingTemplate: |
+        #set($isAdmin = $ctx.identity.resolverContext.isAdmin == "true")
         #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
         #set($officeId = $ctx.arguments.officeId)
 
-        #if(!$allowedOffices.contains($officeId))
+        #if(!$isAdmin && !$allowedOffices.contains($officeId))
           $util.unauthorized()
         #end      
         {
@@ -365,34 +428,50 @@ Resources:
       FieldName: getOffices
       DataSourceName: !GetAtt OfficesDataSource.Name
       RequestMappingTemplate: |
+        #set($isAdmin = $ctx.identity.resolverContext.isAdmin == "true")
         #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
+        #set($tableName = $ctx.source.tableName)
 
-        #set($ids = [])
-        #foreach($id in $allowedOffices)
-            #set($map = {})
-            $util.qr($map.put("officeId", $util.dynamodb.toString($id)))
-            $util.qr($ids.add($map))
+        #if($isAdmin)
+          {
+              "version" : "2017-02-28",
+              "operation" : "Scan"
+          }
+        #else
+          #set($ids = [])
+          #foreach($id in $allowedOffices)
+              #set($map = {})
+              $util.qr($map.put("officeId", $util.dynamodb.toString($id)))
+              $util.qr($ids.add($map))
+          #end
+
+          {
+              "version" : "2018-05-29",
+              "operation" : "BatchGetItem",
+              "tables" : {
+                  "$tableName": {
+                      "keys": $util.toJson($ids),
+                      "consistentRead": true
+                  }
+              }
+          }
         #end
-
-        {
-            "version" : "2018-05-29",
-            "operation" : "BatchGetItem",
-            "tables" : {
-                "OfficesTable": {
-                    "keys": $util.toJson($ids),
-                    "consistentRead": true
-                }
-            }
-        }
       ResponseMappingTemplate: |
         #if($ctx.error)
           $utils.error($ctx.error.message, $ctx.error.type)
         #end
-        #set($result = [])
-        #foreach($item in $ctx.result.data.OfficesTable)
-            #if(!$util.isNull($item))
-                $util.qr($result.add($item))
+        #if($isAdmin)
+          #set($result = $ctx.result.items)
+        #else
+          #set($tableName = $ctx.source.tableName)
+          #set($result = [])
+          #if($ctx.result.data && $ctx.result.data[$tableName])
+            #foreach($item in $ctx.result.data[$tableName])
+                #if(!$util.isNull($item))
+                    $util.qr($result.add($item))
+                #end
             #end
+          #end
         #end
         $util.toJson($result)
 
@@ -410,12 +489,48 @@ Resources:
             "payload": {}
         }
       ResponseMappingTemplate: |
-        #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
-        #set($filter = {
-          "officeId": {
-            "in": $allowedOffices
-          }
-        })
-        $extensions.setSubscriptionFilter($util.transform.toSubscriptionFilter($filter))
+        #set($isAdmin = $ctx.identity.resolverContext.isAdmin == "true")
+        #if(!$isAdmin && $ctx.identity.resolverContext && $ctx.identity.resolverContext.allowedOffices)
+          #set($allowedOffices = $util.parseJson($ctx.identity.resolverContext.allowedOffices))
+          #if($allowedOffices && $allowedOffices.size() > 0)
+            #set($filter = {
+              "officeId": {
+                "in": $allowedOffices
+              }
+            })
+            $extensions.setSubscriptionFilter($util.transform.toSubscriptionFilter($filter))
+          #end
+        #end
 
         null
+
+Outputs:
+  GraphQLApiId:
+    Description: OFFICE-STATUS - GRAPHQL API ID | ID de la API GraphQL de AppSync
+    Value: !GetAtt AppSyncGraphQLApi.ApiId
+    Export:
+      Name: !Sub ${AWS::StackName}-graphql-api-id
+
+  GraphQLApiEndpoint:
+    Description: OFFICE-STATUS - GRAPHQL API ENDPOINT | Endpoint de la API GraphQL de AppSync
+    Value: !GetAtt AppSyncGraphQLApi.GraphQLUrl
+    Export:
+      Name: !Sub ${AWS::StackName}-graphql-api-endpoint
+
+  GraphQLApiArn:
+    Description: OFFICE-STATUS - GRAPHQL API ARN | ARN de la API GraphQL de AppSync
+    Value: !GetAtt AppSyncGraphQLApi.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-graphql-api-arn
+
+  UsersTableName:
+    Description: OFFICE-STATUS - USERS TABLE NAME | Nombre de la tabla DynamoDB de usuarios
+    Value: !Ref UsersTable
+    Export:
+      Name: !Sub ${AWS::StackName}-users-table-name
+
+  OfficesTableName:
+    Description: OFFICE-STATUS - OFFICES TABLE NAME | Nombre de la tabla DynamoDB de oficinas
+    Value: !Ref OfficesTable
+    Export:
+      Name: !Sub ${AWS::StackName}-offices-table-name
